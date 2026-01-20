@@ -1,0 +1,16 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "BWT Water Softener",
+        "description": "Provide the Bluetooth MAC address of your BWT softener.",
+        "data": {
+          "address": "MAC address"
+        }
+      }
+    },
+    "error": {
+      "already_configured": "This device is already configured."
+    }
+  }
+}

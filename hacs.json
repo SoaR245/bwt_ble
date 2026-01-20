@@ -1,0 +1,7 @@
+{
+  "name": "BWT Water Softener BLE",
+  "content_in_root": false,
+  "domains": ["bwt_ble"],
+  "homeassistant": "2024.8.0",
+  "iot_class": "local_polling"
+}

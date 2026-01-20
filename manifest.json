@@ -1,0 +1,18 @@
+{
+  "domain": "bwt_ble",
+  "name": "BWT Water Softener BLE",
+  "version": "0.1.0",
+  "documentation": "https://github.com/soar245/bwt-ble",
+  "issue_tracker": "https://github.com/soar245/bwt-ble/issues",
+  "dependencies": [
+    "bluetooth_adapters"
+  ],
+  "requirements": [
+    "bleak-retry-connector>=3.0.0"
+  ],
+  "codeowners": [
+    "@soar245"
+  ],
+  "config_flow": true,
+  "iot_class": "local_polling"
+}
