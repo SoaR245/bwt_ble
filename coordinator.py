@@ -27,6 +27,11 @@ class BwtBleCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         self._last_regen: int | None = None
         self._last_quarter_consumption = 0.0
         self._regen_total = 0
+        # Estimated remaining: the broadcast remaining value updates infrequently
+        # (e.g. only after regeneration), so we track consumption since the last
+        # broadcast change and subtract it to provide a real-time estimate.
+        self._broadcast_remaining_base: int | None = None
+        self._consumption_since_base: float = 0.0
         # Storage for persisting consumption across restarts
         storage_key = f"{STORAGE_KEY_PREFIX}.{address.replace(':', '_').lower()}"
         self._store: Store = Store(hass, STORAGE_VERSION, storage_key)
@@ -43,6 +48,8 @@ class BwtBleCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 self._last_quarter_idx = data.get("last_quarter_idx")
                 self._last_regen = data.get("last_regen")
                 self._regen_total = int(data.get("regen_total", 0))
+                self._broadcast_remaining_base = data.get("broadcast_remaining_base")
+                self._consumption_since_base = float(data.get("consumption_since_base", 0.0))
                 _LOGGER.debug(
                     "Loaded persisted data: water_total=%.0f, last_q_idx=%s, regen_total=%d",
                     self._consumption_total, self._last_quarter_idx, self._regen_total
@@ -59,6 +66,8 @@ class BwtBleCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 "last_quarter_idx": self._last_quarter_idx,
                 "last_regen": self._last_regen,
                 "regen_total": self._regen_total,
+                "broadcast_remaining_base": self._broadcast_remaining_base,
+                "consumption_since_base": self._consumption_since_base,
             })
         except Exception as err:
             _LOGGER.warning("Failed to save consumption data: %s", err)
@@ -113,6 +122,9 @@ class BwtBleCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                     regen_changed = self._last_regen is not None and regen != self._last_regen
                     if regen_changed:
                         self._regen_total += 1
+                        # Regeneration resets the capacity; trust the new broadcast value
+                        self._broadcast_remaining_base = broadcast.remaining
+                        self._consumption_since_base = 0.0
                         _LOGGER.debug("Regen detected: %d -> %d, total regens=%d", self._last_regen, regen, self._regen_total)
                     
                     if not regen_changed:
@@ -123,6 +135,7 @@ class BwtBleCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                         ]
                         new_litres = sum(entry.get("litres", 0) for entry in new_entries)
                         self._consumption_total += new_litres
+                        self._consumption_since_base += new_litres
                         # Store last quarter consumption (most recent entry before current_q_idx)
                         # The entry at (current_q_idx - 1) represents the consumption of the quarter that just ended
                         last_entry = next((e for e in reversed(new_entries) if e.get("device_index") == current_q_idx - 1), None)
@@ -152,7 +165,31 @@ class BwtBleCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
 
             self._last_quarter_idx = current_q_idx
             self._last_regen = regen
-            
+
+            # Update estimated remaining water.
+            # The BLE broadcast remaining value updates infrequently (e.g. only
+            # after regeneration).  We detect when it changes and reset our
+            # running consumption adjustment so that between broadcast updates
+            # the sensor decreases in step with observed quarter-hour usage.
+            if self._broadcast_remaining_base is None:
+                # First read ever
+                self._broadcast_remaining_base = broadcast.remaining
+                self._consumption_since_base = 0.0
+            elif broadcast.remaining != self._broadcast_remaining_base:
+                # Broadcast remaining changed (regeneration or device update)
+                _LOGGER.debug(
+                    "Broadcast remaining changed: %d -> %d, resetting adjustment (was %.0f)",
+                    self._broadcast_remaining_base,
+                    broadcast.remaining,
+                    self._consumption_since_base,
+                )
+                self._broadcast_remaining_base = broadcast.remaining
+                self._consumption_since_base = 0.0
+
+            estimated_remaining = max(
+                0, self._broadcast_remaining_base - self._consumption_since_base
+            )
+
             # Save quarter index even if no consumption change (for restart recovery)
             if quarter_idx_changed or not self._storage_loaded:
                 await self._async_save_storage()
@@ -162,6 +199,7 @@ class BwtBleCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
 
         return {
             "broadcast": broadcast,
+            "estimated_remaining": estimated_remaining,
             "water_total": self._consumption_total,
             "last_quarter_consumption": self._last_quarter_consumption,
             "regen_total": self._regen_total,

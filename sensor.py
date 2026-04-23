@@ -23,7 +23,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DATA_COORDINATOR, DEFAULT_NAME, DOMAIN
 from .coordinator import BwtBleCoordinator
-from .ble import BroadcastFrame
+from .ble import BroadcastFrame, _clamp_ratio
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -42,7 +42,12 @@ SENSORS: tuple[BwtBleSensorDescription, ...] = (
         name="Remaining Capacity",
         native_unit_of_measurement=PERCENTAGE,
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda data: round(_ensure_broadcast(data).percentage * 100, 2),
+        value_fn=lambda data: round(
+            _clamp_ratio(
+                _ensure_broadcast(data).total_capacity,
+                data.get("estimated_remaining", _ensure_broadcast(data).remaining),
+            ) * 100, 2
+        ),
     ),
     BwtBleSensorDescription(
         key="remaining_volume",
@@ -50,7 +55,7 @@ SENSORS: tuple[BwtBleSensorDescription, ...] = (
         device_class=SensorDeviceClass.WATER,
         native_unit_of_measurement=UnitOfVolume.LITERS,
         state_class=SensorStateClass.TOTAL,  # water device class requires total/total_increasing
-        value_fn=lambda data: _ensure_broadcast(data).remaining,
+        value_fn=lambda data: data.get("estimated_remaining", _ensure_broadcast(data).remaining),
     ),
     BwtBleSensorDescription(
         key="water_consumption",
