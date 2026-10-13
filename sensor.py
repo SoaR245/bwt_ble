@@ -66,6 +66,22 @@ SENSORS: tuple[BwtBleSensorDescription, ...] = (
         value_fn=lambda data: data.get("water_total"),
     ),
     BwtBleSensorDescription(
+        key="water_consumption_monthly",
+        name="Monthly Water Consumption",
+        device_class=SensorDeviceClass.WATER,
+        native_unit_of_measurement=UnitOfVolume.LITERS,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        value_fn=lambda data: data.get("water_monthly", 0),
+    ),
+    BwtBleSensorDescription(
+        key="water_consumption_yearly",
+        name="Yearly Water Consumption",
+        device_class=SensorDeviceClass.WATER,
+        native_unit_of_measurement=UnitOfVolume.LITERS,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        value_fn=lambda data: data.get("water_yearly", 0),
+    ),
+    BwtBleSensorDescription(
         key="last_quarter_consumption",
         name="Last Quarter Hour Consumption",
         native_unit_of_measurement=UnitOfVolume.LITERS,

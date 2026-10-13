@@ -1,10 +1,14 @@
 # BWT Water Softener BLE
 
-Home Assistant custom integration (HACS compatible) that connects to BWT water softeners over Bluetooth Low Energy using the same protocol as the official mobile app. The integration exposes three sensors:
+Home Assistant custom integration (HACS compatible) that connects to BWT water softeners over Bluetooth Low Energy using the same protocol as the official mobile app. The integration exposes sensors for:
 
 1. **Remaining Capacity (%)** – percentage of the salt tank capacity.
 2. **Remaining Water (L)** – absolute litres remaining before regeneration.
-3. **Water Consumption (L)** – continuously increasing counter that rolls over only when Home Assistant restarts.
+3. **Water Consumption (L)** – persisted, continuously increasing counter.
+4. **Monthly Water Consumption (L)** – consumption for the current calendar month, reset at the start of each month.
+5. **Yearly Water Consumption (L)** – consumption for the current calendar year, reset at the start of each year.
+6. **Last Quarter Hour Consumption (L)** – consumption during the last completed 15-minute period.
+7. **Regeneration Count** – total number of detected regeneration cycles.
 
 ## Requirements
 
@@ -22,7 +26,7 @@ Home Assistant custom integration (HACS compatible) that connects to BWT water s
 ## Notes
 
 - The integration connects to the softener during each coordinator update (default every 5 minutes). Adjust `DEFAULT_SCAN_INTERVAL` in `const.py` if you need faster polling.
-- The water consumption sensor accumulates usage across regeneration cycles by tracking the drop in remaining capacity; it resets only when Home Assistant restarts or the integration is removed.
+- Consumption counters are persisted across Home Assistant restarts. The monthly and yearly counters begin accumulating from the time this version is installed; earlier consumption in the current period is not backfilled.
 - Enable Bluetooth access for Home Assistant (host mode or container) so Bleak can open the adapter (usually `/org/bluez/hci0`).
 
 ## Troubleshooting

@@ -7,6 +7,7 @@ from typing import Any, Dict
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .ble import BroadcastFrame, async_fetch_snapshot
 from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
@@ -26,6 +27,10 @@ class BwtBleCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         self._last_quarter_idx: int | None = None
         self._last_regen: int | None = None
         self._last_quarter_consumption = 0.0
+        self._consumption_monthly = 0.0
+        self._consumption_yearly = 0.0
+        self._month_key: str | None = None
+        self._year_key: str | None = None
         self._regen_total = 0
         # Estimated remaining: the broadcast remaining value updates infrequently
         # (e.g. only after regeneration), so we track consumption since the last
@@ -48,6 +53,10 @@ class BwtBleCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 self._last_quarter_idx = data.get("last_quarter_idx")
                 self._last_regen = data.get("last_regen")
                 self._regen_total = int(data.get("regen_total", 0))
+                self._consumption_monthly = float(data.get("water_monthly", 0.0))
+                self._consumption_yearly = float(data.get("water_yearly", 0.0))
+                self._month_key = data.get("month_key")
+                self._year_key = data.get("year_key")
                 self._broadcast_remaining_base = data.get("broadcast_remaining_base")
                 self._consumption_since_base = float(data.get("consumption_since_base", 0.0))
                 _LOGGER.debug(
@@ -66,6 +75,10 @@ class BwtBleCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 "last_quarter_idx": self._last_quarter_idx,
                 "last_regen": self._last_regen,
                 "regen_total": self._regen_total,
+                "water_monthly": self._consumption_monthly,
+                "water_yearly": self._consumption_yearly,
+                "month_key": self._month_key,
+                "year_key": self._year_key,
                 "broadcast_remaining_base": self._broadcast_remaining_base,
                 "consumption_since_base": self._consumption_since_base,
             })
@@ -81,6 +94,16 @@ class BwtBleCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         await self._async_load_storage()
 
         quarter_idx_changed = False
+        now = dt_util.now()
+        month_key = now.strftime("%Y-%m")
+        year_key = now.strftime("%Y")
+        period_changed = month_key != self._month_key or year_key != self._year_key
+        if month_key != self._month_key:
+            self._consumption_monthly = 0.0
+            self._month_key = month_key
+        if year_key != self._year_key:
+            self._consumption_yearly = 0.0
+            self._year_key = year_key
         broadcast: BroadcastFrame | None = None
 
         try:
@@ -136,6 +159,21 @@ class BwtBleCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                         new_litres = sum(entry.get("litres", 0) for entry in new_entries)
                         self._consumption_total += new_litres
                         self._consumption_since_base += new_litres
+                        current_utc = dt_util.utcnow()
+                        quarter_end_utc = current_utc.replace(
+                            minute=(current_utc.minute // 15) * 15,
+                            second=0,
+                            microsecond=0,
+                        )
+                        for entry in new_entries:
+                            quarter_offset = (current_q_idx - 1 - entry["device_index"]) % 2880
+                            entry_time = dt_util.as_local(
+                                quarter_end_utc - timedelta(minutes=15 * quarter_offset)
+                            )
+                            if entry_time.strftime("%Y-%m") == month_key:
+                                self._consumption_monthly += entry.get("litres", 0)
+                            if entry_time.strftime("%Y") == year_key:
+                                self._consumption_yearly += entry.get("litres", 0)
                         # Store last quarter consumption (most recent entry before current_q_idx)
                         # The entry at (current_q_idx - 1) represents the consumption of the quarter that just ended
                         last_entry = next((e for e in reversed(new_entries) if e.get("device_index") == current_q_idx - 1), None)
@@ -191,7 +229,7 @@ class BwtBleCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             )
 
             # Save quarter index even if no consumption change (for restart recovery)
-            if quarter_idx_changed or not self._storage_loaded:
+            if quarter_idx_changed or period_changed or not self._storage_loaded:
                 await self._async_save_storage()
 
         except Exception as err:
@@ -201,6 +239,8 @@ class BwtBleCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             "broadcast": broadcast,
             "estimated_remaining": estimated_remaining,
             "water_total": self._consumption_total,
+            "water_monthly": self._consumption_monthly,
+            "water_yearly": self._consumption_yearly,
             "last_quarter_consumption": self._last_quarter_consumption,
             "regen_total": self._regen_total,
         }
