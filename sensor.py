@@ -18,6 +18,7 @@ from homeassistant.const import PERCENTAGE, UnitOfVolume
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -121,6 +122,15 @@ async def async_setup_entry(
 ) -> None:
     storage = hass.data[DOMAIN][entry.entry_id]
     coordinator: BwtBleCoordinator = storage[DATA_COORDINATOR]
+    registry = er.async_get(hass)
+    source = registry.async_get_entity_id("sensor", DOMAIN, f"{entry.entry_id}_water_consumption")
+    missing = {
+        period for period in ("monthly", "yearly")
+        if registry.async_get_entity_id(
+            "sensor", DOMAIN, f"{entry.entry_id}_water_consumption_{period}"
+        ) is None
+    }
+    await coordinator.async_initialize_history(source, missing)
     entities: list = [BwtBleSensor(coordinator, entry.entry_id, description) for description in SENSORS]
     entities.extend([BwtBleBinarySensor(coordinator, entry.entry_id, description) for description in BINARY_SENSORS])
     async_add_entities(entities)

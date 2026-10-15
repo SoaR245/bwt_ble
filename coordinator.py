@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 import logging
+from math import isfinite
 from typing import Any, Dict
 
 from homeassistant.core import HomeAssistant
@@ -18,6 +19,35 @@ STORAGE_VERSION = 1
 STORAGE_KEY_PREFIX = f"{DOMAIN}.consumption"
 
 
+def _historical_consumption(
+    rows: list[dict[str, Any]], period_start: datetime, current_total: float
+) -> tuple[float, bool] | None:
+    valid_rows = sorted(
+        (
+            row for row in rows
+            if all(
+                isinstance(row.get(key), (int, float)) and isfinite(row[key])
+                for key in ("start", "state", "sum")
+            )
+        ),
+        key=lambda row: row["start"],
+    )
+    if not valid_rows:
+        return None
+    boundary = period_start.timestamp()
+    preceding = [row for row in valid_rows if row["start"] + 3600 <= boundary]
+    baseline = preceding[-1] if preceding else valid_rows[0]
+    latest = valid_rows[-1]
+    live_delta = current_total - latest["state"]
+    if live_delta < 0:
+        _LOGGER.warning("Cannot backfill consumption: stored total is behind recorded statistics")
+        return None
+    consumption = latest["sum"] - baseline["sum"] + live_delta
+    if consumption < 0:
+        return None
+    return consumption, baseline["start"] + 3600 != boundary
+
+
 class BwtBleCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
     def __init__(self, hass: HomeAssistant, *, address: str, scan_interval: int | None = None) -> None:
         update_interval = timedelta(seconds=scan_interval or DEFAULT_SCAN_INTERVAL)
@@ -31,6 +61,9 @@ class BwtBleCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         self._consumption_yearly = 0.0
         self._month_key: str | None = None
         self._year_key: str | None = None
+        self._history_initialized: set[str] = set()
+        self._history_pending: set[str] = set()
+        self._history_source: str | None = None
         self._regen_total = 0
         # Estimated remaining: the broadcast remaining value updates infrequently
         # (e.g. only after regeneration), so we track consumption since the last
@@ -57,6 +90,7 @@ class BwtBleCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 self._consumption_yearly = float(data.get("water_yearly", 0.0))
                 self._month_key = data.get("month_key")
                 self._year_key = data.get("year_key")
+                self._history_initialized = set(data.get("history_initialized", []))
                 self._broadcast_remaining_base = data.get("broadcast_remaining_base")
                 self._consumption_since_base = float(data.get("consumption_since_base", 0.0))
                 _LOGGER.debug(
@@ -79,6 +113,7 @@ class BwtBleCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 "water_yearly": self._consumption_yearly,
                 "month_key": self._month_key,
                 "year_key": self._year_key,
+                "history_initialized": sorted(self._history_initialized),
                 "broadcast_remaining_base": self._broadcast_remaining_base,
                 "consumption_since_base": self._consumption_since_base,
             })
@@ -88,6 +123,69 @@ class BwtBleCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
     @property
     def address(self) -> str:
         return self._address
+
+    async def async_initialize_history(self, source: str | None, missing: set[str]) -> None:
+        """Initialize new or unmigrated period counters from recorder statistics."""
+        self._history_source = source
+        self._history_pending = missing | ({"monthly", "yearly"} - self._history_initialized)
+        await self._async_backfill_history()
+        if self.data is not None:
+            self.data.update(
+                water_monthly=self._consumption_monthly,
+                water_yearly=self._consumption_yearly,
+            )
+
+    async def _async_backfill_history(self) -> None:
+        if not self._history_pending or self._history_source is None:
+            return
+        if "recorder" not in self.hass.config.components:
+            return
+        from homeassistant.components.recorder import get_instance
+        from homeassistant.components.recorder.statistics import statistics_during_period
+
+        now = dt_util.now()
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        starts = {"monthly": month_start, "yearly": month_start.replace(month=1)}
+        changed = False
+        for period in tuple(self._history_pending):
+            start = dt_util.as_utc(starts[period])
+            try:
+                statistics = await get_instance(self.hass).async_add_executor_job(
+                    statistics_during_period,
+                    self.hass,
+                    start - timedelta(days=1),
+                    dt_util.as_utc(now),
+                    {self._history_source},
+                    "hour",
+                    {"volume": "L"},
+                    {"state", "sum"},
+                )
+            except Exception as err:
+                _LOGGER.warning("Failed to read %s consumption statistics: %s", period, err)
+                continue
+            result = _historical_consumption(
+                statistics.get(self._history_source, []), start, self._consumption_total
+            )
+            if result is None:
+                continue
+            consumption, incomplete = result
+            if period == "monthly":
+                self._consumption_monthly = consumption
+                self._month_key = now.strftime("%Y-%m")
+            else:
+                self._consumption_yearly = consumption
+                self._year_key = now.strftime("%Y")
+            self._history_initialized.add(period)
+            self._history_pending.remove(period)
+            changed = True
+            if incomplete:
+                _LOGGER.warning(
+                    "%s consumption backfilled from the first available statistic; "
+                    "history does not cover the start of the period", period,
+                )
+            _LOGGER.info("Initialized %s consumption from %s: %.0f L", period, self._history_source, consumption)
+        if changed:
+            await self._async_save_storage()
 
     async def _async_update_data(self) -> Dict[str, Any]:
         # Load persisted data on first run
@@ -235,6 +333,7 @@ class BwtBleCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         except Exception as err:
             raise UpdateFailed(str(err)) from err
 
+        await self._async_backfill_history()
         return {
             "broadcast": broadcast,
             "estimated_remaining": estimated_remaining,
