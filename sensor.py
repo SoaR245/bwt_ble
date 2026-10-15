@@ -130,7 +130,14 @@ async def async_setup_entry(
             "sensor", DOMAIN, f"{entry.entry_id}_water_consumption_{period}"
         ) is None
     }
-    await coordinator.async_initialize_history(source, missing)
+    targets = {
+        period: statistic_id
+        for period in ("monthly", "yearly")
+        if (statistic_id := registry.async_get_entity_id(
+            "sensor", DOMAIN, f"{entry.entry_id}_water_consumption_{period}"
+        )) is not None
+    }
+    await coordinator.async_initialize_history(source, missing, targets)
     entities: list = [BwtBleSensor(coordinator, entry.entry_id, description) for description in SENSORS]
     entities.extend([BwtBleBinarySensor(coordinator, entry.entry_id, description) for description in BINARY_SENSORS])
     async_add_entities(entities)
@@ -151,6 +158,13 @@ class BwtBleSensor(CoordinatorEntity[BwtBleCoordinator], SensorEntity):
             manufacturer="BWT",
             name=DEFAULT_NAME,
         )
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        if self.entity_description.key == "water_consumption_monthly":
+            await self.coordinator.async_register_history_target("monthly", self.entity_id)
+        elif self.entity_description.key == "water_consumption_yearly":
+            await self.coordinator.async_register_history_target("yearly", self.entity_id)
 
     @property
     def native_value(self) -> Any:

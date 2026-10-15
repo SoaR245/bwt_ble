@@ -31,13 +31,13 @@ Home Assistant custom integration (HACS compatible) that connects to BWT water s
 
 ## Historical initialization
 
-Keep the main Water Consumption entity, its recorded statistics, and the integration's stored consumption data. Recorder must be enabled for historical initialization. The source entity is located by its unique ID, so renaming it is supported.
+Keep the main Water Consumption entity, its long-term statistics, and the integration's stored consumption data. Recorder must be enabled. The source and destination entities are located by their unique IDs, so renaming them is supported.
 
-To test reinitialization, delete only the monthly and yearly entities from the entity registry, install the updated integration, and restart Home Assistant. The integration recreates the missing entities and replaces their current values with the reconstructed consumption. Deleting just one period entity only reinitializes that period. Deletion is not required for the first upgrade.
+No entity deletion is needed. Install the updated integration and restart Home Assistant; the versioned migration initializes the current counters and imports their historical statistics. Each period is tracked separately, so a temporary Recorder or import failure is retried without repeating a completed period.
 
-Initialization uses hourly statistics and includes consumption since the latest recorded statistic. Boundary precision is limited by the available readings. If history does not cover the period boundary, the nearest available reference is used and a warning is logged; the result may omit or include consumption around that gap. Missing statistics or database failures are retried on subsequent coordinator updates without interrupting BLE polling. Without Recorder, counters continue accumulating normally.
+On the first update after this backfill version, the integration reconstructs hourly statistics for the monthly and yearly counters from the earliest retained statistics of the main counter. Recorder imports those points under each counter's statistic ID, so its historical chart includes prior months and years. The current period counters are also initialized and saved. Boundary precision follows the hourly source data; gaps or statistics starting after the counter itself existed cannot be reconstructed and are logged. Missing source or destination statistic IDs and Recorder failures are retried without interrupting BLE polling. Without Recorder or retained source statistics, the integration can only continue counting from the current period.
 
-Successful initialization is saved and is not repeated on normal restarts or period resets. Look for `Initialized monthly consumption` and `Initialized yearly consumption` in the `custom_components.bwt_ble.coordinator` logs. This initializes current values only; it does not insert past records into the new entities' history.
+Successful imports are versioned and are not repeated on normal restarts or period resets. Look for `Queued ... historical statistics` and `Initialized monthly consumption` / `Initialized yearly consumption` in the `custom_components.bwt_ble.coordinator` logs. Imported statistics populate hourly long-term history; they do not recreate the original five-minute state history.
 
 ## Development
 

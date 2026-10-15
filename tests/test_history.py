@@ -38,6 +38,7 @@ def load_coordinator():
     update.DataUpdateCoordinator = CoordinatorDouble
     update.UpdateFailed = RuntimeError
     dates = modules["homeassistant.util.dt"]
+    dates.UTC = timezone.utc
     dates.now = lambda: NOW
     dates.utcnow = lambda: NOW.astimezone(timezone.utc)
     dates.as_utc = lambda value: value.astimezone(timezone.utc)
@@ -60,6 +61,24 @@ coordinator_module = load_coordinator()
 
 def row(end, state, total_sum):
     return {"start": (end - timedelta(hours=1)).timestamp(), "state": state, "sum": total_sum}
+
+
+class PeriodStatisticsTests(unittest.TestCase):
+    def test_monthly_and_yearly_states_reset_but_sums_keep_increasing(self):
+        utc = timezone.utc
+        rows = [
+            row(datetime(2025, 12, 31, 21, tzinfo=utc), 100, 100),
+            row(datetime(2025, 12, 31, 22, tzinfo=utc), 110, 110),
+            row(datetime(2025, 12, 31, 23, tzinfo=utc), 115, 115),
+            row(datetime(2026, 1, 31, 22, tzinfo=utc), 200, 200),
+            row(datetime(2026, 12, 31, 22, tzinfo=utc), 300, 300),
+        ]
+        monthly = coordinator_module._build_period_statistics(rows, "monthly")
+        yearly = coordinator_module._build_period_statistics(rows, "yearly")
+        self.assertEqual([item["state"] for item in monthly], [0, 10, 15, 85, 100])
+        self.assertEqual([item["sum"] for item in monthly], [0, 10, 15, 100, 200])
+        self.assertEqual([item["state"] for item in yearly], [0, 10, 15, 100, 100])
+        self.assertEqual([item["sum"] for item in yearly], [0, 10, 15, 100, 200])
 
 
 class ConsumptionTests(unittest.TestCase):
@@ -104,36 +123,54 @@ class InitializationTests(unittest.IsolatedAsyncioTestCase):
         recorder_module.get_instance = lambda hass: self.recorder
         statistics_module = ModuleType("homeassistant.components.recorder.statistics")
         statistics_module.statistics_during_period = Mock()
+        statistics_module.async_import_statistics = self.import_statistics = Mock()
+        models_module = ModuleType("homeassistant.components.recorder.models")
+        models_module.StatisticMeanType = SimpleNamespace(NONE="none")
         self.modules = patch.dict(sys.modules, {
             "homeassistant.components.recorder": recorder_module,
             "homeassistant.components.recorder.statistics": statistics_module,
+            "homeassistant.components.recorder.models": models_module,
         })
         self.modules.start()
         self.addCleanup(self.modules.stop)
 
     def query(self, function, hass, start, end, ids, period, units, types):
-        boundary = start + timedelta(days=1)
-        baseline = 90000 if boundary.astimezone(NOW.tzinfo).month == 10 else 10000
-        return {SOURCE: [row(boundary, baseline, baseline - 1000), row(NOW, 96000, 95000)]}
+        year_start = NOW.replace(month=1, day=1, hour=0, minute=0)
+        month_start = NOW.replace(day=1, hour=0, minute=0)
+        return {SOURCE: [
+            row(year_start, 10000, 9000),
+            row(month_start, 90000, 89000),
+            row(NOW, 96000, 95000),
+        ]}
 
     async def test_new_counters_are_replaced_saved_and_published(self):
         self.coordinator._consumption_monthly = 50
-        await self.coordinator.async_initialize_history(SOURCE, {"monthly", "yearly"})
+        await self.coordinator.async_initialize_history(
+            SOURCE, {"monthly", "yearly"}, {"monthly": "sensor.monthly", "yearly": "sensor.yearly"}
+        )
         self.assertEqual(self.coordinator.data["water_monthly"], 6323)
         self.assertEqual(self.coordinator.data["water_yearly"], 86323)
         saved = self.coordinator._store.async_save.call_args.args[0]
         self.assertEqual(saved["history_initialized"], ["monthly", "yearly"])
+        self.assertEqual(saved["history_statistics_versions"], {"monthly": 1, "yearly": 1})
+        self.assertEqual(self.import_statistics.call_count, 2)
+        imported = {
+            call.args[1]["statistic_id"]: call.args[2]
+            for call in self.import_statistics.call_args_list
+        }
+        self.assertEqual(set(imported), {"sensor.monthly", "sensor.yearly"})
+        self.assertTrue(all(item["start"].tzinfo == timezone.utc for values in imported.values() for item in values))
         for call in self.recorder.async_add_executor_job.call_args_list:
             self.assertEqual(call.args[4:], ({SOURCE}, "hour", {"volume": "L"}, {"state", "sum"}))
             self.assertEqual(call.args[2].tzinfo, timezone.utc)
         calls = self.recorder.async_add_executor_job.call_count
-        await self.coordinator.async_initialize_history(SOURCE, set())
+        await self.coordinator.async_initialize_history(SOURCE, set(), {"monthly": "sensor.monthly", "yearly": "sensor.yearly"})
         self.assertEqual(self.recorder.async_add_executor_job.call_count, calls)
 
-    async def test_deleting_only_monthly_reinitializes_only_monthly(self):
+    async def test_missing_monthly_entity_reinitializes_only_monthly(self):
         self.coordinator._history_initialized = {"monthly", "yearly"}
         self.coordinator._consumption_yearly = 123
-        await self.coordinator.async_initialize_history(SOURCE, {"monthly"})
+        await self.coordinator.async_initialize_history(SOURCE, {"monthly"}, {"monthly": "sensor.monthly"})
         self.assertEqual(self.coordinator._consumption_monthly, 6323)
         self.assertEqual(self.coordinator._consumption_yearly, 123)
         self.recorder.async_add_executor_job.assert_awaited_once()
@@ -160,17 +197,28 @@ class InitializationTests(unittest.IsolatedAsyncioTestCase):
         exec(compile(code, str(path), "exec"), namespace)
         add_entities = Mock()
         await namespace["async_setup_entry"](self.hass, SimpleNamespace(entry_id="entry"), add_entities)
-        self.coordinator.async_initialize_history.assert_awaited_once_with(SOURCE, {"monthly"})
+        self.coordinator.async_initialize_history.assert_awaited_once_with(
+            SOURCE, {"monthly"}, {"yearly": "sensor.yearly"}
+        )
         add_entities.assert_called_once_with([])
 
     async def test_existing_unmigrated_counters_are_initialized(self):
-        await self.coordinator.async_initialize_history(SOURCE, set())
+        await self.coordinator.async_initialize_history(SOURCE, set(), {"monthly": "sensor.monthly", "yearly": "sensor.yearly"})
         self.assertEqual(self.coordinator._history_initialized, {"monthly", "yearly"})
+
+    async def test_missing_entity_ids_are_registered_after_entity_creation(self):
+        await self.coordinator.async_initialize_history(SOURCE, {"monthly", "yearly"})
+        self.import_statistics.assert_not_called()
+        await self.coordinator.async_register_history_target("monthly", "sensor.monthly")
+        await self.coordinator.async_register_history_target("yearly", "sensor.yearly")
+        imported_ids = [call.args[1]["statistic_id"] for call in self.import_statistics.call_args_list]
+        self.assertEqual(imported_ids, ["sensor.monthly", "sensor.yearly"])
+        self.assertEqual(self.coordinator._history_statistics_versions, {"monthly": 1, "yearly": 1})
 
     async def test_missing_statistics_are_retried(self):
         self.recorder.async_add_executor_job.side_effect = None
         self.recorder.async_add_executor_job.return_value = {}
-        await self.coordinator.async_initialize_history(SOURCE, {"monthly"})
+        await self.coordinator.async_initialize_history(SOURCE, {"monthly"}, {"monthly": "sensor.monthly"})
         self.assertEqual(self.coordinator._history_initialized, set())
         self.coordinator._store.async_save.assert_not_awaited()
         self.recorder.async_add_executor_job.side_effect = self.query
@@ -183,9 +231,9 @@ class InitializationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.coordinator._history_pending, {"monthly", "yearly"})
 
     async def test_recorder_disabled_or_missing_source_does_not_query(self):
-        await self.coordinator.async_initialize_history(None, {"monthly"})
+        await self.coordinator.async_initialize_history(None, {"monthly"}, {"monthly": "sensor.monthly"})
         self.hass.config.components.clear()
-        await self.coordinator.async_initialize_history(SOURCE, {"monthly"})
+        await self.coordinator.async_initialize_history(SOURCE, {"monthly"}, {"monthly": "sensor.monthly"})
         self.recorder.async_add_executor_job.assert_not_awaited()
 
     async def test_markers_are_restored_from_storage(self):
@@ -193,14 +241,16 @@ class InitializationTests(unittest.IsolatedAsyncioTestCase):
         self.coordinator._store.async_load.return_value = {
             "water_total": 96323, "water_monthly": 6323, "water_yearly": 86323,
             "history_initialized": ["monthly", "yearly"],
+            "history_statistics_versions": {"monthly": 1, "yearly": 1},
         }
         await self.coordinator._async_load_storage()
-        await self.coordinator.async_initialize_history(SOURCE, set())
+        await self.coordinator.async_initialize_history(SOURCE, set(), {"monthly": "sensor.monthly", "yearly": "sensor.yearly"})
         self.recorder.async_add_executor_job.assert_not_awaited()
         self.assertEqual(self.coordinator._consumption_monthly, 6323)
 
     async def test_new_period_resets_without_repeating_backfill(self):
         self.coordinator._history_initialized = {"monthly", "yearly"}
+        self.coordinator._history_statistics_versions = {"monthly": 1, "yearly": 1}
         self.coordinator._history_source = SOURCE
         self.coordinator._month_key = "2025-12"
         self.coordinator._year_key = "2025"
@@ -214,6 +264,21 @@ class InitializationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["water_yearly"], 0)
         self.assertEqual(data["water_total"], 96323)
         self.recorder.async_add_executor_job.assert_not_awaited()
+
+    async def test_successful_period_import_is_not_repeated_after_other_fails(self):
+        self.import_statistics.side_effect = lambda hass, metadata, rows: (
+            (_ for _ in ()).throw(RuntimeError("import failed"))
+            if metadata["statistic_id"] == "sensor.yearly" else None
+        )
+        await self.coordinator.async_initialize_history(
+            SOURCE, set(), {"monthly": "sensor.monthly", "yearly": "sensor.yearly"}
+        )
+        self.assertEqual(self.coordinator._history_statistics_versions, {"monthly": 1})
+        self.import_statistics.reset_mock()
+        self.import_statistics.side_effect = None
+        await self.coordinator._async_backfill_history()
+        self.import_statistics.assert_called_once()
+        self.assertEqual(self.import_statistics.call_args.args[1]["statistic_id"], "sensor.yearly")
 
 
 if __name__ == "__main__":
