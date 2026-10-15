@@ -14,18 +14,25 @@ Home Assistant custom integration (HACS compatible) that connects to BWT water s
 
 - Home Assistant host with Bluetooth adapter supported by [Bleak](https://github.com/hbldh/bleak).
 - Device MAC address (e.g. `03:12:00:1D:00:39`).
-- Python dependency downloaded automatically (`bleak==2.0.0`).
+- Python dependency `bleak-retry-connector`, installed automatically by Home Assistant.
 
 ## Installation
 
-1. Copy the `bwt_ble` folder into `config/custom_components/` (or add this repository as a custom repository in HACS).
-2. Restart Home Assistant to register the integration.
-3. In the UI, navigate to **Settings → Devices & Services → Add Integration** and search for **BWT Water Softener BLE**.
-4. Enter the Bluetooth MAC address when prompted.
+### HACS
+
+1. In HACS, add this repository as a custom repository with the **Integration** category, then download it.
+2. Restart Home Assistant.
+3. In **Settings → Devices & Services → Add Integration**, search for **BWT Water Softener BLE** and enter the Bluetooth MAC address.
+
+[Add this repository to HACS](https://my.home-assistant.io/redirect/hacs_repository/?owner=SoaR245&repository=bwt_ble&category=integration)
+
+### Manual installation
+
+Copy `custom_components/bwt_ble` into the `custom_components` directory of your Home Assistant configuration, then restart Home Assistant and add the integration from **Settings → Devices & Services**.
 
 ## Notes
 
-- The integration connects to the softener during each coordinator update (default every 5 minutes). Adjust `DEFAULT_SCAN_INTERVAL` in `const.py` if you need faster polling.
+- The integration connects to the softener during each coordinator update (default every 5 minutes). Adjust `DEFAULT_SCAN_INTERVAL` in `custom_components/bwt_ble/const.py` if you need faster polling.
 - Consumption counters are persisted across Home Assistant restarts. The monthly and yearly counters begin accumulating from the time this version is installed; earlier consumption in the current period is not backfilled.
 - Enable Bluetooth access for Home Assistant (host mode or container) so Bleak can open the adapter (usually `/org/bluez/hci0`).
 

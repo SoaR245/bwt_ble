@@ -2,8 +2,8 @@
   "domain": "bwt_ble",
   "name": "BWT Water Softener BLE",
   "version": "0.2.0",
-  "documentation": "https://github.com/soar245/bwt-ble",
-  "issue_tracker": "https://github.com/soar245/bwt-ble/issues",
+  "documentation": "https://github.com/SoaR245/bwt_ble",
+  "issue_tracker": "https://github.com/SoaR245/bwt_ble/issues",
   "dependencies": [
     "bluetooth_adapters"
   ],
