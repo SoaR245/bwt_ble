@@ -1,5 +1,6 @@
 {
   "name": "BWT Water Softener BLE",
   "content_in_root": false,
-  "homeassistant": "2024.8.0"
+  "homeassistant": "2024.8.0",
+  "category": "integration"
 }
