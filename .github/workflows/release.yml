@@ -1,0 +1,107 @@
+name: Release
+
+# La version de l'intégration est celle du tag de la release : elle est
+# injectée dans manifest.json au moment de construire l'archive. Dans le
+# dépôt, manifest.json garde la version de développement 0.0.0.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag de la release à (re)construire"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  DOMAIN: bwt_ble
+  TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+
+jobs:
+  build:
+    name: Construire et publier l'archive
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 1/6 📥 Récupération du dépôt
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: 2/6 🏷️ Version depuis le tag
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${TAG#v}"
+          echo "    tag     : ${TAG}"
+          echo "    version : ${VERSION}"
+
+          # Format année.mois.itération, ex. 2026.9.10
+          if ! [[ "${VERSION}" =~ ^20[0-9]{2}\.(1[0-2]|[1-9])\.[0-9]+$ ]]; then
+            echo "    ❌ tag « ${TAG} » hors format AAAA.M.N (ex. 2026.9.10)"
+            exit 1
+          fi
+
+          echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
+          echo "    ✅ tag valide"
+
+      - name: 3/6 🧪 Exécution des tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          pip install --quiet -r requirements-test.txt
+          python -m pytest -q
+          echo "    ✅ suite de tests au vert"
+
+      - name: 4/6 ✏️ Injection de la version dans manifest.json
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MANIFEST="custom_components/${DOMAIN}/manifest.json"
+          jq --arg v "${VERSION}" '.version = $v' "${MANIFEST}" > manifest.tmp
+          mv manifest.tmp "${MANIFEST}"
+
+          LUE=$(jq -r .version "${MANIFEST}")
+          if [ "${LUE}" != "${VERSION}" ]; then
+            echo "    ❌ manifest.json annonce ${LUE} au lieu de ${VERSION}"
+            exit 1
+          fi
+          echo "    ✅ manifest.json → ${VERSION}"
+
+      - name: 5/6 📦 Construction de l'archive
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # HACS extrait l'archive directement dans custom_components/<domain>/ :
+          # elle doit donc contenir les fichiers à sa racine, sans dossier parent.
+          cd "custom_components/${DOMAIN}"
+          zip -qr "${GITHUB_WORKSPACE}/${DOMAIN}.zip" . \
+            -x "*__pycache__*" "*.pyc"
+
+          cd "${GITHUB_WORKSPACE}"
+          echo "    Contenu :"
+          unzip -l "${DOMAIN}.zip" | tail -n +4 | head -n -2 | awk '{print "      " $4}'
+
+          if ! unzip -l "${DOMAIN}.zip" | grep -q " manifest.json$"; then
+            echo "    ❌ manifest.json absent de la racine de l'archive"
+            exit 1
+          fi
+
+          ZIP_VERSION=$(unzip -p "${DOMAIN}.zip" manifest.json | jq -r .version)
+          if [ "${ZIP_VERSION}" != "${VERSION}" ]; then
+            echo "    ❌ l'archive annonce ${ZIP_VERSION} au lieu de ${VERSION}"
+            exit 1
+          fi
+          echo "    ✅ ${DOMAIN}.zip ${VERSION} prête ($(du -h "${DOMAIN}.zip" | cut -f1))"
+
+      - name: 6/6 🚀 Publication sur la release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          files: ${{ env.DOMAIN }}.zip
