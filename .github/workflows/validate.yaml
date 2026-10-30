@@ -8,7 +8,7 @@ on:
 permissions: {}
 
 jobs:
-  test-history:
+  validate-hacs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
